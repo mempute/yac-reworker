@@ -1,2 +1,1 @@
-# yac-reworker
-YAC reworker.sh 공개 미러 — 원본 mempute/yac-data-pipeline scripts/reworker.sh
+`reworker.sh` — `mempute/yac-data-pipeline` 의 `scripts/reworker.sh` 자동 미러(TASK-573). 새 기계: `curl -fsSL https://raw.githubusercontent.com/mempute/yac-reworker/main/reworker.sh -o ~/reworker.sh` · `bash ~/reworker.sh <워커이름> mempute/yac-data-pipeline`
