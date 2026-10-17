@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 판본: mempute/yac-data-pipeline@7ed2061d43760c359f213189e02c24eb81579e6c · 2026-10-17T09:32:22Z · 자동 동기화(TASK-573, 허브 워크플로 reworker_mirror) — 원본 scripts/reworker.sh · 손 편집 금지
+# 판본: mempute/yac-data-pipeline@f934222c049a06207c0dc881fc9fe9efe64cf882 · 2026-10-17T18:52:35Z · 자동 동기화(TASK-573, 허브 워크플로 reworker_mirror) — 원본 scripts/reworker.sh · 손 편집 금지
 # reworker.sh — 워커 **유일 진입**(멱등, 재실행 안전). TASK-107.
 #
 # 사용(상태가 어떻든 언제나 같은 한 줄):
@@ -500,6 +500,23 @@ INST_MISS_EOF
 # 잡 안이면 확인만(`YAC_PY_CHECK_ONLY=1`)·설치는 보고다. `py_deps_run` 은
 # 시험 이음매(모의로 갈아 "무엇이 몇 번 불렸는가"를 잰다).
 py_deps_run() { bash "$REWORKER_ROOT/scripts/py_deps_ensure.sh" "$@"; }
+# 외부 import 전수 대조 검사 칸(TASK-576 범위 1) — agents/*.py 의 외부 import ⊆ py_requirements.txt ∪ py_optional.txt.
+# 목록에 빠진 모듈은 설치 통로가 영영 모른다(소비처의 늦은 import 는 셋업 검사에 안 잡힌다 — 실측 reportlab rc 1 × 3회차).
+# 잡 안·밖 같은 판정(설치 0 · 보고만) · 시험 이음매(`py_imports_run`)는 모의로 갈 수 있다.
+py_imports_run() { python3 "$REWORKER_ROOT/scripts/py_imports_check.py" "$@"; }
+project_py_imports_check() {  # $1=저장소 루트 → 목록 있는 프로젝트마다 ok/bad 한 칸(설치 0 · 판정만)
+  local root="$1" req pid out
+  for req in "$root"/projects/*/config/py_requirements.txt; do
+    [ -f "$req" ] || continue
+    pid="$(basename "$(dirname "$(dirname "$req")")")"
+    if out="$(py_imports_run --root "$root" "$pid" 2>&1)"; then
+      ok "프로젝트 $pid 외부 import 전수 등재(py_imports_check)"
+    else
+      bad "프로젝트 $pid 외부 import 미등재 — $(printf '%s\n' "$out" | grep '미등재 import' | head -3 | tr '\n' ' ')(projects/$pid/config/py_requirements.txt 또는 py_optional.txt 등재 뒤 'bash scripts/py_deps_ensure.sh projects/$pid/config/py_requirements.txt')"
+    fi
+  done
+  return 0
+}
 project_py_deps_ensure() {  # $1=저장소 루트 $2=잡 안(1/0) → ok/fix/bad 에 집계
   local root="$1" in_job="${2:-0}" req pid rel n=0 out installed
   for req in "$root"/projects/*/config/py_requirements.txt; do
@@ -1767,6 +1784,8 @@ fi
 # 읽으면 목록이 아니라 \0GITCRYPT 바이트를 pip 에 넘긴다.
 rw_phase "① 환경 점검·보충 · 1-5a 프로젝트 의존(unlock 뒤)"
 project_py_deps_ensure "$ROOT" "$IN_JOB"
+# 1-5b) 외부 import 전수 대조 검사 칸(TASK-576 범위 1) — 목록에 빠진 모듈은 위 통로가 영영 모른다(늦은 import 는 회차에서야 rc 1 · JL-2026-10-2473).
+project_py_imports_check "$ROOT"
 
 
 # ①-0) 값 입력 창구 단일화(TASK-116 ③, 판정 축 승격 TASK-116b ①).
