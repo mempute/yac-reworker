@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 판본: mempute/yac-data-pipeline@27a6a4f0f11998a6fa154539ec9db05c2345b5de · 2026-10-18T17:10:11Z · 자동 동기화(TASK-573, 허브 워크플로 reworker_mirror) — 원본 scripts/reworker.sh · 손 편집 금지
+# 판본: mempute/yac-data-pipeline@8b5022e94a6e7b45b46af961421d3315fb554d4a · 2026-10-18T17:30:50Z · 자동 동기화(TASK-573, 허브 워크플로 reworker_mirror) — 원본 scripts/reworker.sh · 손 편집 금지
 # reworker.sh — 워커 **유일 진입**(멱등, 재실행 안전). TASK-107.
 #
 # 사용(상태가 어떻든 언제나 같은 한 줄):
@@ -734,12 +734,29 @@ need_names() {
   done
   printf '%s' "${out#, }"
 }
+# unlock 전 상태에서 난 잔여의 수(TASK-582 범위 2). RW_LOCKED=1 이고
+# RW_LOCKED_BAD_FROM(unlock 실패 직후 BAD 길이) 이후 항목 중 암호문·모듈
+# 부재 표지(ImportError·ModuleNotFoundError·No module named·Traceback·
+# 암호문)가 있는 것만 센다 — 다른 원인의 잔여는 접지 않는다(정직, CR-0016).
+# 순수 함수(전역 배열·두 변수만 읽는다).
+locked_bad_fold() {
+  local i n=0 m
+  [ "${RW_LOCKED:-0}" = 1 ] || { printf 0; return 0; }
+  for ((i = ${RW_LOCKED_BAD_FROM:-0}; i < ${#BAD[@]}; i++)); do
+    m="${BAD[$i]}"
+    case "$m" in
+      *ImportError*|*ModuleNotFoundError*|*"No module named"*|*Traceback*|*암호문*) n=$((n + 1)) ;;
+    esac
+  done
+  printf '%s' "$n"
+}
 summary_line() {  # $1=워커 이름
-  local w="${1:-worker}" msg f n
-  f="$(fix_names)"; n="$(need_names)"
+  local w="${1:-worker}" msg f n lk
+  f="$(fix_names)"; n="$(need_names)"; lk="$(locked_bad_fold)"
   msg="${w} reworker: 정상 ${#OK[@]}·복구 ${#FIX[@]}·잔여 ${#BAD[@]}"
   [ -n "$f" ] && msg="$msg | 고침: $f"
   [ -n "$n" ] && msg="$msg | 입력 필요: $n"
+  [ "$lk" -gt 0 ] 2>/dev/null && msg="$msg | 잔여 중 ${lk}건은 unlock 전(저장소 키 미전달 — ENROLL §2 전달 뒤 재실행에서 다시 판정)"
   if [ ${#BAD[@]} -eq 0 ] && [ ${#NEED[@]} -eq 0 ]; then
     printf '[OK] %s' "$msg"
   else
@@ -1766,7 +1783,12 @@ if head -c 9 docs/PROTOCOL.md 2>/dev/null | grep -q GITCRYPT; then
   if [ -s "$HOME/.secrets/gitcrypt.key" ] && git-crypt unlock "$HOME/.secrets/gitcrypt.key" 2>/dev/null; then
     fix "보호 문서 git-crypt 해제"
   else
-    bad "보호 문서가 아직 암호문 — 저장소 키(~/.secrets/gitcrypt.key) 확보 후 재실행"
+    bad "보호 문서가 아직 암호문 — 저장소 키(~/.secrets/gitcrypt.key) 미전달(vault 는 복원하지 않는다, TASK-283 경계) · 기존 워커에서 scp 한 줄 + git-crypt unlock + reworker 재실행(ENROLL §2)"
+    # 이 뒤에 나는 잔여는 대개 암호문 설정/모듈을 읽지 못해 생기는 한 원인의
+    # 파생이다(TASK-582 범위 2 — vast2 첫 완주의 13건 중 9건). 요약에서
+    # 그 묶음을 한 줄로 접는다(locked_bad_fold). 값은 바꾸지 않는다.
+    RW_LOCKED=1
+    RW_LOCKED_BAD_FROM=${#BAD[@]}
   fi
 else
   ok "보호 문서 평문(git-crypt 해제됨)"
@@ -2775,6 +2797,10 @@ for m in "${OK[@]:-}";   do [ -n "$m" ] && echo "  정상: $m"; done
 for m in "${FIX[@]:-}";  do [ -n "$m" ] && echo "  복구: $m"; done
 for m in "${BAD[@]:-}";  do [ -n "$m" ] && echo "  잔여: $m"; done
 for m in "${NEED[@]:-}"; do [ -n "$m" ] && echo "  입력: $m"; done
+LKN="$(locked_bad_fold)"
+if [ "$LKN" -gt 0 ] 2>/dev/null; then
+  echo "  묶음: 위 잔여 중 ${LKN}건은 unlock 전 상태(보호 문서 암호문)에서 난 항목 — 저장소 키 전달·git-crypt unlock 뒤 재실행에서 다시 판정(ENROLL §2, TASK-582)"
+fi
 
 W="${WORKER:-worker}"
 FIXNAMES="$(fix_names)"
