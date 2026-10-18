@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 판본: mempute/yac-data-pipeline@f934222c049a06207c0dc881fc9fe9efe64cf882 · 2026-10-17T18:52:35Z · 자동 동기화(TASK-573, 허브 워크플로 reworker_mirror) — 원본 scripts/reworker.sh · 손 편집 금지
+# 판본: mempute/yac-data-pipeline@27a6a4f0f11998a6fa154539ec9db05c2345b5de · 2026-10-18T17:10:11Z · 자동 동기화(TASK-573, 허브 워크플로 reworker_mirror) — 원본 scripts/reworker.sh · 손 편집 금지
 # reworker.sh — 워커 **유일 진입**(멱등, 재실행 안전). TASK-107.
 #
 # 사용(상태가 어떻든 언제나 같은 한 줄):
@@ -245,8 +245,13 @@ rw_self_bootstrap() {  # $@=원 인자 — 돌아오지 않는다(exec 또는 ex
     exit 0
   fi
   cd "$root" || exit 1
-  if ! YAC_REWORKER_ACTIVE=1 bash scripts/bootstrap_worker.sh "$worker"; then
-    echo "[reworker/자급] bootstrap_worker.sh 실패 — 위 출력 확인 뒤 clone 안에서 'bash scripts/reworker.sh $worker' 재실행" >&2
+  # 실패 분기는 rc 를 싣는다(TASK-581 — vast2 실측에서 사람이 본 것은 "crontab:
+  # command not found" 한 줄과 이 문면뿐이라 어느 단계가 죽었는지 rc 로 가른다).
+  # cron 부재 자체는 이제 bootstrap 안에서 경고 한 줄 + 건너뜀이라 여기로 오지 않는다.
+  local brc=0
+  YAC_REWORKER_ACTIVE=1 bash scripts/bootstrap_worker.sh "$worker" || brc=$?
+  if [ "$brc" -ne 0 ]; then
+    echo "[reworker/자급] bootstrap_worker.sh 실패(rc=$brc) — 위 출력 확인 뒤 clone 안에서 'bash scripts/reworker.sh $worker' 재실행(멱등 — 끝난 단계는 건너뛴다)" >&2
     exit 1
   fi
   sb_say "부트스트랩 완료 — clone 안 reworker 로 재진입"
@@ -672,9 +677,15 @@ register_onstart() {  # $1=파일 $2=줄
 # 같은 기계의 인스턴스들이 통째로 공유한다 — 인스턴스마다 등재하면 30분
 # 체크포인트가 N중으로 돌며 서로를 덮어쓴다. 그래서 비-host 인스턴스에는
 # 등재 대상 자체가 없다(공백 0).
+#
+# `crontab` 명령 자체가 없는 기계(cron 없는 컨테이너, TASK-581 vast2 실측)는
+# 3종 이름 대신 원인 하나 `crontab없음` 을 낸다 — bootstrap 은 그 기계에서
+# 등재를 건너뛰므로(치명 아님) 잔여 공백의 문면이 "무엇이 빠졌나"가 아니라
+# "왜 못 채우나"여야 사람이 다음 손(cron 설치)을 안다(CR-0016·CR-0123).
 missing_cron() {
   local out="" tab
   [ "${YAC_INSTANCE_HOST:-1}" = 1 ] || { printf '%s' ""; return 0; }
+  command -v crontab >/dev/null 2>&1 || { printf '%s' "crontab없음"; return 0; }
   tab="$(crontab -l 2>/dev/null || true)"
   printf '%s' "$tab" | grep -q 'checkpoint\.sh'    || out="$out checkpoint"
   printf '%s' "$tab" | grep -q 'yac_tmp_clean\.sh' || out="$out yac_tmp_clean"
