@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 판본: mempute/yac-data-pipeline@8b5022e94a6e7b45b46af961421d3315fb554d4a · 2026-10-18T17:30:50Z · 자동 동기화(TASK-573, 허브 워크플로 reworker_mirror) — 원본 scripts/reworker.sh · 손 편집 금지
+# 판본: mempute/yac-data-pipeline@333c0258841fa204d4359045fb6d2a9d75e211b4 · 2026-10-19T08:56:03Z · 자동 동기화(TASK-573, 허브 워크플로 reworker_mirror) — 원본 scripts/reworker.sh · 손 편집 금지
 # reworker.sh — 워커 **유일 진입**(멱등, 재실행 안전). TASK-107.
 #
 # 사용(상태가 어떻든 언제나 같은 한 줄):
@@ -255,7 +255,9 @@ rw_self_bootstrap() {  # $@=원 인자 — 돌아오지 않는다(exec 또는 ex
     exit 1
   fi
   sb_say "부트스트랩 완료 — clone 안 reworker 로 재진입"
-  exec bash "$root/scripts/reworker.sh" "$worker" ${rest[@]+"${rest[@]}"}
+  # YAC_REWORKER_SELFBOOT=1 은 「빈 기계 첫 편입」 표지다 — 1-5 unlock 이 추적
+  # 변경을 stash 로 감싸는 갈래는 이 표지가 있을 때뿐이다(TASK-583, rw_vault_unlock).
+  YAC_REWORKER_SELFBOOT=1 exec bash "$root/scripts/reworker.sh" "$worker" ${rest[@]+"${rest[@]}"}
 }
 
 # 잡(GitHub Actions 러너) 안인가. 러너 관련 단계의 자기 살해 방지 판정.
@@ -930,6 +932,89 @@ renew_gate() {
   return 0
 }
 
+# ── 1-5 허브 git-crypt unlock 원시(TASK-583, 편입 결함 소발주 3) ─────────
+# 왜 함수인가: 시험(tests_reworker 583 절)이 **같은 본문**을 라이브러리
+# 모드로 부른다(CR-0010 — 모의판을 따로 베끼면 그 차이가 곧 다음 결함이다).
+#
+# 실측(vast2 2026-10-18 15:1x): vault 가 ~/.secrets/gitcrypt.key 를 복원했는데도
+# unlock 이 조용히 실패해 unlock 의존 잔여 9건이 남았다. 원인 고리 셋 —
+#  ⓐ `.worker_name` 이 추적 파일(커밋값 vast1)이라 bootstrap 이 vast2 를 쓰는
+#     순간 트리가 더러워졌다(→ 색인 제거 + .gitignore, 이 커밋).
+#  ⓑ `git-crypt unlock` 은 **추적 파일** 변경이 하나라도 있으면 "Working
+#     directory not clean" 으로 거부한다(미추적은 무관). 빈 기계 첫 편입(자급
+#     갈래)에서 bootstrap 이 방금 손댄 추적 파일이 그 변경일 수 있어 **자급
+#     갈래에서만** stash → unlock → stash pop 으로 감싼다. 저장소 안 재실행은
+#     코더 WIP 가 있을 수 있어 종전 그대로다(발주 예견 ②, CR-0024).
+#  ⓒ 종전 `2>/dev/null` 이 그 사유를 숨겨 "저장소 키 확보 후 재실행" 으로
+#     오진됐다 — 사유를 bad 문면에 그대로 싣는다(CR-0016 · CR-0006).
+# 잠김→해제 **전이**가 나면 RW_UNLOCK_TRANSITION=1 — 호출부가 ① 절 unlock 의존
+# 걸음의 재진입(1회)을 결정한다(범위 1). 반환 0=평문 · 1=잠김 잔존.
+rw_vault_unlock() {  # $1=저장소 키 경로(기본 ~/.secrets/gitcrypt.key) · cwd=저장소 루트
+  local key="${1:-$HOME/.secrets/gitcrypt.key}" err rc=0 stashed=0 why
+  RW_UNLOCK_TRANSITION=0
+  if ! head -c 9 docs/PROTOCOL.md 2>/dev/null | grep -q GITCRYPT; then
+    ok "보호 문서 평문(git-crypt 해제됨)"
+    return 0
+  fi
+  if [ ! -s "$key" ]; then
+    bad "unlock 실패: 저장소 키 없음($key) — vault 복원이 키를 놓지 못했다(위 1-5 vault 줄 참조)"
+    return 1
+  fi
+  if [ "${YAC_REWORKER_SELFBOOT:-0}" = 1 ] \
+     && [ -n "$(git status --porcelain --untracked-files=no 2>/dev/null)" ]; then
+    if git stash push -q -m "reworker-583-unlock" >/dev/null 2>&1; then
+      stashed=1
+    else
+      say "자급 갈래: 추적 변경 stash 실패 — unlock 은 그대로 시도(사유는 아래 줄)"
+    fi
+  fi
+  err="$(git-crypt unlock "$key" 2>&1 >/dev/null)" || rc=$?
+  if [ "$stashed" = 1 ]; then
+    git stash pop -q >/dev/null 2>&1 \
+      || say "자급 갈래: stash pop 실패 — 'git stash list' 로 확인(값은 보관돼 있다)"
+  fi
+  if [ "$rc" = 0 ]; then
+    if [ "$stashed" = 1 ]; then
+      fix "보호 문서 git-crypt 해제(자급 갈래: 추적 변경 stash → unlock → pop)"
+    else
+      fix "보호 문서 git-crypt 해제"
+    fi
+    RW_UNLOCK_TRANSITION=1
+    return 0
+  fi
+  why="$(printf '%s' "$err" | tr '\n' ' ' | sed 's/  */ /g; s/^ //; s/ $//')"
+  [ -n "$why" ] || why="rc=$rc(사유 출력 없음)"
+  bad "unlock 실패: $why — 추적 변경이 사유면 'git status --short' 로 치운 뒤 재실행, 키가 사유면 ~/.secrets/gitcrypt.key 를 확인"
+  return 1
+}
+
+# `.worker_name` 은 색인 밖(.gitignore, TASK-583)이라 색인 제거 커밋을 당긴
+# 기존 clone(값이 커밋값과 같던 자리)에서는 pull 이 그 파일을 지운다 — 없으면
+# 되쓴다(발주 예견 ①). 값은 기계 이름(TASK-341: 보조 인스턴스도 같다). 있는
+# 파일은 손대지 않는다(1-6 bootstrap·inst_share_ledgers 가 종전대로 맞춘다).
+rw_identity_ensure() {
+  local root="${ROOT:-$REWORKER_ROOT}"
+  [ -n "${WORKER:-}" ] || return 0
+  [ -s "$root/.worker_name" ] && return 0
+  printf '%s\n' "${YAC_MACHINE:-$WORKER}" > "$root/.worker_name" \
+    && fix ".worker_name 되씀(← ${YAC_MACHINE:-$WORKER}; 색인 밖 파일이라 pull 이 지웠다)"
+}
+
+# 색인 제거 전이의 뒤처리(TASK-583 실측): 로컬 값이 커밋값과 다른 clone 이 그
+# 커밋을 `pull --autostash` 로 당기면 rc 0 인데도 미병합 `DU .worker_name` 과
+# `autostash` 항목이 남아 다음 pull --rebase·git-crypt unlock 이 전부 막힌다.
+# 판정·수행은 코어 원시 하나(`worktree_sync.repair_identity`, 인스턴스 sync 와
+# 같은 것)이고 여기는 문면만 — repaired 는 fix, 그 밖은 [WARN] 한 줄(CR-0006).
+rw_identity_repair() {  # $1=자리 표지(pull 앞|pull 뒤)
+  local out
+  out="$(python3 "$REWORKER_ROOT/scripts/core/worktree_sync.py" identity-repair "${ROOT:-$REWORKER_ROOT}" 2>&1)"
+  case "$out" in
+    *" — repaired: "*)   fix ".worker_name 색인 제거 전이 뒤처리($1): ${out##* — repaired: }" ;;
+    *" — clean: "*)      : ;;
+    *)                   say "[WARN] .worker_name 전이 뒤처리($1) 미완 — ${out##* — }" ;;
+  esac
+}
+
 # 라이브러리 모드는 여기서 끝 — 아래 본 실행은 건드리지 않는다.
 if [ "${YAC_REWORKER_LIB:-0}" = 1 ] || [ "${YAC_RESTORE_LIB:-0}" = 1 ]; then
   return 0
@@ -977,6 +1062,10 @@ fix()  { FIX+=("$1"); say "복구: $1"; }
 bad()  { BAD+=("$1"); }
 # "무엇을 어디에 넣어라" 한 줄. 값은 절대 적지 않는다(비밀 규칙).
 need() { NEED+=("$1"); say "입력 필요 — $1"; }
+
+# 색인 밖 `.worker_name` 이 없으면 되쓴다(TASK-583 예견 ①; 함수 주석 참조).
+# 1-3 pull 뒤에도 한 번 더 — 그 pull 이 지운 자리를 같은 실행 안에서 메운다.
+rw_identity_ensure
 
 # root 사용 가능 여부: 직접 root 이거나 무암호 sudo 가 실제로 통할 때만
 # 참으로 본다. `command -v sudo` 만 보면 sudoers 미등재 계정(vast1 의 aa,
@@ -1779,19 +1868,29 @@ human)
     MIG_KEYF="$KEYF"
   fi ;;
 esac
-if head -c 9 docs/PROTOCOL.md 2>/dev/null | grep -q GITCRYPT; then
-  if [ -s "$HOME/.secrets/gitcrypt.key" ] && git-crypt unlock "$HOME/.secrets/gitcrypt.key" 2>/dev/null; then
-    fix "보호 문서 git-crypt 해제"
-  else
-    bad "보호 문서가 아직 암호문 — 저장소 키(~/.secrets/gitcrypt.key) 미전달(vault 는 복원하지 않는다, TASK-283 경계) · 기존 워커에서 scp 한 줄 + git-crypt unlock + reworker 재실행(ENROLL §2)"
-    # 이 뒤에 나는 잔여는 대개 암호문 설정/모듈을 읽지 못해 생기는 한 원인의
-    # 파생이다(TASK-582 범위 2 — vast2 첫 완주의 13건 중 9건). 요약에서
-    # 그 묶음을 한 줄로 접는다(locked_bad_fold). 값은 바꾸지 않는다.
-    RW_LOCKED=1
-    RW_LOCKED_BAD_FROM=${#BAD[@]}
-  fi
-else
-  ok "보호 문서 평문(git-crypt 해제됨)"
+# 허브 unlock 본문은 `rw_vault_unlock`(라이브러리 절, TASK-583) — 자급 갈래의
+# stash 감싸기·실패 사유 노출이 거기 있다. 잠김이 남으면(반환 1) 이 뒤에 나는
+# 잔여는 대개 암호문 설정/모듈을 읽지 못해 생기는 한 원인의 파생이다(TASK-582
+# 범위 2 — vast2 첫 완주의 13건 중 9건). 요약에서 그 묶음을 한 줄로 접는다
+# (locked_bad_fold). 값은 바꾸지 않는다.
+rw_vault_unlock "$HOME/.secrets/gitcrypt.key" || {
+  RW_LOCKED=1
+  RW_LOCKED_BAD_FROM=${#BAD[@]}
+}
+# 범위 1(TASK-583): 잠김→해제 **전이**가 났으면 ① 절의 unlock 의존 걸음(①-지문·
+# ①-원격 `remote_cred.py`·1-4b local_llm — 전부 1-5 **앞**이라 이 실행에서는 잠긴
+# 채 지나갔다, PLN-3997)을 같은 실행 안에서 한 번 더 돌린다. 방식은 **재진입 1회**
+# (사전 `config/rebuild.yml` `reworker_unlock_reentry: once|none`) — 걸음을 1-5 뒤로
+# 옮기는 길은 ①-지문·①-원격의 「창구 앞」 순서 불변식(TASK-116d·237)과 충돌한다.
+# 꼴은 1-3 의 자기 갱신 재실행과 같고, 둘째 패스는 평문이라 전이가 없어 끝난다
+# (표지 REWORKER_UNLOCK_REENTRY 가 루프를 막는다). exec 앞에 이 실행이 만든
+# 임시 표지(1-5 의 개인키 파일)를 지운다 — exec 는 트랩을 타지 않는다(4-1).
+RW_REENTRY="$(sed -n 's/^reworker_unlock_reentry: *\([a-z]*\).*/\1/p' config/rebuild.yml 2>/dev/null)"
+if [ "${RW_UNLOCK_TRANSITION:-0}" = 1 ] && [ "${RW_REENTRY:-once}" != none ] \
+   && [ -z "${REWORKER_UNLOCK_REENTRY:-}" ]; then
+  say "보호 문서 해제됨 — ① 절 unlock 의존 걸음 재진입(1회, 사전 reworker_unlock_reentry=${RW_REENTRY:-once})"
+  rw_cleanup_temps
+  REWORKER_UNLOCK_REENTRY=1 exec bash scripts/reworker.sh "$@"
 fi
 # yac-state 저장 암호화 경계 배선(TASK-124). **순서가 불변식이다** —
 # vault 복원 → 저장소 키 → 허브 unlock → **여기(yac-state unlock)** →
@@ -2059,8 +2158,15 @@ else
 fi
 
 # 1-3) 최신화(--autostash: 더러운 트리를 스스로 치우고 되돌린다)
+# `.worker_name` 색인 제거 전이(TASK-583)의 뒤처리를 pull **앞뒤**에 둔다 —
+# 앞은 옛 판이 이미 당겨 미병합으로 남긴 트리(그대로면 pull --rebase 가 거부),
+# 뒤는 이 pull 이 방금 전이를 만든 트리. 자기 갱신 재실행(exec)보다 앞이어야
+# 새 판의 1-3 이 막히지 않는다.
+rw_identity_repair "pull 앞"
 SELF_BEFORE="$(md5sum scripts/reworker.sh 2>/dev/null | cut -d' ' -f1)"
 if git pull --rebase --autostash -q origin main 2>/dev/null; then
+  rw_identity_repair "pull 뒤"
+  rw_identity_ensure
   ok "작업 폴더 최신화 완료($(git rev-parse --short HEAD))"
   SELF_AFTER="$(md5sum scripts/reworker.sh 2>/dev/null | cut -d' ' -f1)"
   if [ "$SELF_BEFORE" != "$SELF_AFTER" ] && [ -z "${REWORKER_REEXEC:-}" ]; then
@@ -2068,6 +2174,7 @@ if git pull --rebase --autostash -q origin main 2>/dev/null; then
     REWORKER_REEXEC=1 exec bash scripts/reworker.sh "$@"
   fi
 else
+  rw_identity_repair "pull 뒤"
   bad "pull --rebase 실패 — 위 항목 해소 후 재실행"
 fi
 
