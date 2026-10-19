@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 판본: mempute/yac-data-pipeline@333c0258841fa204d4359045fb6d2a9d75e211b4 · 2026-10-19T08:56:03Z · 자동 동기화(TASK-573, 허브 워크플로 reworker_mirror) — 원본 scripts/reworker.sh · 손 편집 금지
+# 판본: mempute/yac-data-pipeline@a27ab0153e99bf030495412b979d489004b71e93 · 2026-10-19T11:21:04Z · 자동 동기화(TASK-573, 허브 워크플로 reworker_mirror) — 원본 scripts/reworker.sh · 손 편집 금지
 # reworker.sh — 워커 **유일 진입**(멱등, 재실행 안전). TASK-107.
 #
 # 사용(상태가 어떻든 언제나 같은 한 줄):
@@ -2167,6 +2167,8 @@ SELF_BEFORE="$(md5sum scripts/reworker.sh 2>/dev/null | cut -d' ' -f1)"
 if git pull --rebase --autostash -q origin main 2>/dev/null; then
   rw_identity_repair "pull 뒤"
   rw_identity_ensure
+  # 신원이 비었던 사이 state/unknown 으로 갈린 원장을 제자리로(TASK-594 — 없으면 무동작 · 삭제 0, 보관본으로 옮긴다)
+  say "$(python3 "$REWORKER_ROOT/scripts/core/state_reclaim.py" --root "${ROOT:-$REWORKER_ROOT}" 2>&1 | tail -1)"
   ok "작업 폴더 최신화 완료($(git rev-parse --short HEAD))"
   SELF_AFTER="$(md5sum scripts/reworker.sh 2>/dev/null | cut -d' ' -f1)"
   if [ "$SELF_BEFORE" != "$SELF_AFTER" ] && [ -z "${REWORKER_REEXEC:-}" ]; then
