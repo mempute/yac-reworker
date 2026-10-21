@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 판본: mempute/yac-data-pipeline@a27ab0153e99bf030495412b979d489004b71e93 · 2026-10-19T11:21:04Z · 자동 동기화(TASK-573, 허브 워크플로 reworker_mirror) — 원본 scripts/reworker.sh · 손 편집 금지
+# 판본: mempute/yac-data-pipeline@6a96a952674633ff7b0d590d20cb44f7b8069cb5 · 2026-10-21T05:27:55Z · 자동 동기화(TASK-573, 허브 워크플로 reworker_mirror) — 원본 scripts/reworker.sh · 손 편집 금지
 # reworker.sh — 워커 **유일 진입**(멱등, 재실행 안전). TASK-107.
 #
 # 사용(상태가 어떻든 언제나 같은 한 줄):
@@ -1405,8 +1405,11 @@ EOF_RUNNER
           rm -f r.tar.gz
         fi
       fi
+      # 기계 범위 풀 라벨(TASK-622, 사전 pool_label_format) — 풀 라우팅이 이 라벨로 쏘므로
+      # 등록 시점에 달아야 그 인스턴스가 후보가 된다(서식이 비면 종전 셋뿐).
+      pool_lb="$(python3 "$ROOT/scripts/core/instance.py" pool-label "$cls" 2>/dev/null || true)"
       env $(runner_root_env) ./config.sh --unattended --url "https://github.com/$owner_repo" \
-        --token "$reg" --name "$name" --labels "self-hosted,$name,$cls" --work _work )
+        --token "$reg" --name "$name" --labels "self-hosted,$name,$cls${pool_lb:+,$pool_lb}" --work _work )
     unset reg token
     [ -f "$rd/.runner" ] || { echo "러너 등록 실패($name)" >&2; return 1; }
   fi
@@ -2492,6 +2495,21 @@ if [ -n "$POOL_LABELS" ] && [ -n "$WORKER" ]; then
   else
     bad "러너 풀 라벨 보강 실패($WORKER: $POOL_LABELS) — 'python3 scripts/core/pass_plan.py add-labels $WORKER $POOL_LABELS' 재실행"
   fi
+fi
+# 1-8c) 기대 인스턴스 러너의 기계 범위 풀 라벨 보강(TASK-622) — 이미 등록된 c1·c2… 러너에
+# 사전 `pool_label_format` 의 라벨(vast1-cpu)을 더한다(멱등). 풀 라우팅이 이 라벨로만 쏘므로
+# 빠진 러너는 후보에서 조용히 빠진다 — 실패는 재실행 명령을 실은 bad 항이다(CR-0006).
+if [ -n "$WORKER" ]; then
+  while read -r inst_name inst_cls; do
+    [ -n "$inst_name" ] || continue
+    inst_lbl="$(python3 "$ROOT/scripts/core/instance.py" pool-label "$inst_cls" 2>/dev/null || true)"
+    [ -n "$inst_lbl" ] || continue
+    if python3 "$ROOT/scripts/core/pass_plan.py" add-labels "$inst_name" "$inst_lbl"; then
+      fix "인스턴스 러너 풀 라벨 보강($inst_name: $inst_lbl)"
+    else
+      bad "인스턴스 러너 풀 라벨 보강 실패($inst_name: $inst_lbl) — 'python3 scripts/core/pass_plan.py add-labels $inst_name $inst_lbl' 재실행(러너 미등록이면 ⓪ 절 inst_add 뒤)"
+    fi
+  done < <(python3 "$ROOT/scripts/core/instance.py" expected 2>/dev/null || true)
 fi
 # job-started 훅(매 잡 자동 unlock, PROTOCOL 17-5) — 멱등
 if [ -d "$RD" ] && ! grep -q ACTIONS_RUNNER_HOOK_JOB_STARTED "$RD/.env" 2>/dev/null; then
