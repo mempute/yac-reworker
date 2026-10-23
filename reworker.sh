@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 판본: mempute/yac-data-pipeline@6a96a952674633ff7b0d590d20cb44f7b8069cb5 · 2026-10-21T05:27:55Z · 자동 동기화(TASK-573, 허브 워크플로 reworker_mirror) — 원본 scripts/reworker.sh · 손 편집 금지
+# 판본: mempute/yac-data-pipeline@00067a14d3cc951f6554cb8e39a86602472e00b1 · 2026-10-23T08:33:18Z · 자동 동기화(TASK-573, 허브 워크플로 reworker_mirror) — 원본 scripts/reworker.sh · 손 편집 금지
 # reworker.sh — 워커 **유일 진입**(멱등, 재실행 안전). TASK-107.
 #
 # 사용(상태가 어떻든 언제나 같은 한 줄):
@@ -741,14 +741,33 @@ need_names() {
 # 부재 표지(ImportError·ModuleNotFoundError·No module named·Traceback·
 # 암호문)가 있는 것만 센다 — 다른 원인의 잔여는 접지 않는다(정직, CR-0016).
 # 순수 함수(전역 배열·두 변수만 읽는다).
+#
+# 표지 목록은 사전 `config/rebuild.yml` `reworker_locked_bad_markers`(쉼표 구분)
+# 가 갖는다(TASK-663 ⓒ, CR-0010). 실측 2026-10-23 05:1x vast2: unlock 전 항은
+# 9건(core 모듈 import 오류 7 · yac-state 「저장소 키 확보 후 재실행」 · 로컬 LLM)
+# 인데 종전 손 목록 다섯은 그중 3건만 세어 묶음 줄이 「unlock 전 3건」으로 났다
+# — 사람이 잔여 9건을 여섯 원인으로 읽게 하는 오계수다(CR-0016). 사전을 못
+# 읽으면 종전 다섯 표지로 폴백한다(CR-0024).
+locked_bad_markers() {  # -> 쉼표 구분 표지 한 줄
+  local f="${REWORKER_ROOT:-.}/config/rebuild.yml" v=""
+  v="$(sed -n 's/^reworker_locked_bad_markers:[[:space:]]*//p' "$f" 2>/dev/null | head -1 | sed 's/[[:space:]]*$//')"
+  [ -n "$v" ] || v="ImportError,ModuleNotFoundError,No module named,Traceback,암호문"
+  printf '%s' "$v"
+}
 locked_bad_fold() {
-  local i n=0 m
+  local i n=0 m mk hit
   [ "${RW_LOCKED:-0}" = 1 ] || { printf 0; return 0; }
+  local IFS_SAVE="$IFS" markers=()
+  IFS=',' read -r -a markers <<< "$(locked_bad_markers)"
+  IFS="$IFS_SAVE"
   for ((i = ${RW_LOCKED_BAD_FROM:-0}; i < ${#BAD[@]}; i++)); do
-    m="${BAD[$i]}"
-    case "$m" in
-      *ImportError*|*ModuleNotFoundError*|*"No module named"*|*Traceback*|*암호문*) n=$((n + 1)) ;;
-    esac
+    m="${BAD[$i]}"; hit=0
+    for mk in "${markers[@]}"; do
+      mk="${mk# }"; mk="${mk% }"
+      [ -n "$mk" ] || continue
+      case "$m" in *"$mk"*) hit=1; break ;; esac
+    done
+    [ "$hit" = 1 ] && n=$((n + 1))
   done
   printf '%s' "$n"
 }
@@ -949,8 +968,18 @@ renew_gate() {
 #     오진됐다 — 사유를 bad 문면에 그대로 싣는다(CR-0016 · CR-0006).
 # 잠김→해제 **전이**가 나면 RW_UNLOCK_TRANSITION=1 — 호출부가 ① 절 unlock 의존
 # 걸음의 재진입(1회)을 결정한다(범위 1). 반환 0=평문 · 1=잠김 잔존.
+#
+# **stash 실패 갈래(TASK-663 ⓑ, 실측 2026-10-23 05:1x vast2)**: 자급 갈래의
+# `git stash push` 가 실패하면 종전에는 사유 0 으로 「그대로 시도」해 git-crypt 가
+# Working directory not clean 으로 거부했고, runtime 암호문이 남아 ImportError 7·
+# 로컬 LLM·yac-state 등 잔여 9건이 한 원인으로 섰다. 자급 갈래의 트리는 **이
+# 실행의 부트스트랩이 방금 만든 clone** 이라 추적 변경에 사람 산출이 없다 —
+# 그래서 stash 가 실패하면 stash 의 사유와 `git status --short` 상위 줄을 요약에
+# 싣고(CR-0006·CR-0016) `git checkout -- .` 로 추적 변경을 되돌린 뒤 unlock 한다.
+# 되돌린 파일 목록은 fix 문면에 남는다(CR-0008 — 지운 것이 무엇인지 말한다).
+# 저장소 안 재실행(비자급)은 종전 그대로 손대지 않는다(코더 WIP 보존).
 rw_vault_unlock() {  # $1=저장소 키 경로(기본 ~/.secrets/gitcrypt.key) · cwd=저장소 루트
-  local key="${1:-$HOME/.secrets/gitcrypt.key}" err rc=0 stashed=0 why
+  local key="${1:-$HOME/.secrets/gitcrypt.key}" err rc=0 stashed=0 reverted="" why serr status5
   RW_UNLOCK_TRANSITION=0
   if ! head -c 9 docs/PROTOCOL.md 2>/dev/null | grep -q GITCRYPT; then
     ok "보호 문서 평문(git-crypt 해제됨)"
@@ -962,10 +991,21 @@ rw_vault_unlock() {  # $1=저장소 키 경로(기본 ~/.secrets/gitcrypt.key) �
   fi
   if [ "${YAC_REWORKER_SELFBOOT:-0}" = 1 ] \
      && [ -n "$(git status --porcelain --untracked-files=no 2>/dev/null)" ]; then
-    if git stash push -q -m "reworker-583-unlock" >/dev/null 2>&1; then
+    if serr="$(git stash push -q -m "reworker-583-unlock" 2>&1 >/dev/null)"; then
       stashed=1
     else
-      say "자급 갈래: 추적 변경 stash 실패 — unlock 은 그대로 시도(사유는 아래 줄)"
+      serr="$(printf '%s' "$serr" | tr '\n' ' ' | sed 's/  */ /g; s/^ //; s/ $//')"
+      [ -n "$serr" ] || serr="사유 출력 없음"
+      status5="$(git status --short --untracked-files=no 2>/dev/null | head -5 | tr '\n' ';' | sed 's/;$//')"
+      say "자급 갈래: 추적 변경 stash 실패($serr) — 더러운 추적 파일(상위 5): ${status5:-없음}"
+      reverted="$(git status --porcelain --untracked-files=no 2>/dev/null | awk '{print $NF}' | tr '\n' ' ' | sed 's/ $//')"
+      if git checkout -q -- . 2>/dev/null \
+         && [ -z "$(git status --porcelain --untracked-files=no 2>/dev/null)" ]; then
+        say "자급 갈래: 부트스트랩이 만든 트리라 추적 변경을 되돌림(git checkout -- .): $reverted"
+      else
+        say "자급 갈래: 추적 변경 되돌림 실패 — unlock 은 그대로 시도(사유는 아래 줄)"
+        reverted=""
+      fi
     fi
   fi
   err="$(git-crypt unlock "$key" 2>&1 >/dev/null)" || rc=$?
@@ -976,6 +1016,8 @@ rw_vault_unlock() {  # $1=저장소 키 경로(기본 ~/.secrets/gitcrypt.key) �
   if [ "$rc" = 0 ]; then
     if [ "$stashed" = 1 ]; then
       fix "보호 문서 git-crypt 해제(자급 갈래: 추적 변경 stash → unlock → pop)"
+    elif [ -n "$reverted" ]; then
+      fix "보호 문서 git-crypt 해제(자급 갈래: stash 실패 → 추적 변경 되돌림 → unlock · 되돌린 파일: $reverted)"
     else
       fix "보호 문서 git-crypt 해제"
     fi
@@ -984,7 +1026,8 @@ rw_vault_unlock() {  # $1=저장소 키 경로(기본 ~/.secrets/gitcrypt.key) �
   fi
   why="$(printf '%s' "$err" | tr '\n' ' ' | sed 's/  */ /g; s/^ //; s/ $//')"
   [ -n "$why" ] || why="rc=$rc(사유 출력 없음)"
-  bad "unlock 실패: $why — 추적 변경이 사유면 'git status --short' 로 치운 뒤 재실행, 키가 사유면 ~/.secrets/gitcrypt.key 를 확인"
+  status5="$(git status --short --untracked-files=no 2>/dev/null | head -5 | tr '\n' ';' | sed 's/;$//')"
+  bad "unlock 실패: $why — 추적 변경이 사유면 'git status --short' 로 치운 뒤 재실행(상위 5: ${status5:-없음}), 키가 사유면 ~/.secrets/gitcrypt.key 를 확인"
   return 1
 }
 
@@ -2401,8 +2444,11 @@ fi
 # 계정 보관소 요약(TASK-293) — 등재 상태 한 줄(값 0, `rc_account check`)과
 # 새 계정 안내 한 줄. 미등재 계정은 손 등재(격리 HOME 로그인·파일 복사)가
 # 아니라 전환 명령 하나가 등재 갈래까지 밟는다(CR-0025).
+# 이 줄은 **등재 상태**지 동작 판정이 아니다(TASK-663 ⓓ) — 라이브 자격이 죽었는지는
+# 1-10 claude_p 프로브가 재고, 고장이면 사전 선언 처방(remedy: account_switch)이 보관소의
+# 산 계정으로 자동 전환한 뒤 재측정한다. 여기서 「정상」을 말하지 않는다(CR-0016).
 ACCT_LINE="$(PYTHONPATH="$ROOT/scripts" python3 "$ROOT/scripts/core/rc_account.py" check 2>/dev/null)"
-ok "Claude 계정 보관소 — ${ACCT_LINE:-계측 불가} · 미등재 계정은 'bash scripts/rc_account_switch.sh <이름>' 한 명령(등재 → 전환)"
+say "[INFO] Claude 계정 보관소 등재 — ${ACCT_LINE:-계측 불가} · 동작 판정·자동 전환은 1-10 claude_p 프로브(remedy account_switch) · 미등재 계정은 'bash scripts/rc_account_switch.sh <이름>' 한 명령(등재 → 전환)"
 unset ACCT_LINE
 
 # 1-9c) ntfy 구독 토픽 vault 이전 판정(TASK-113d, PLN-0233). 정본은
@@ -2587,8 +2633,11 @@ PROBE_SEEN=0
 while IFS=$'\t' read -r P_ID P_STATE P_DETAIL; do
   [ -n "$P_ID" ] || continue
   PROBE_SEEN=$((PROBE_SEEN + 1))
+  # fixed(TASK-663 ⓓ): 고장 → 사전 선언 처방(remedy, 예: 보관소 계정 자동 전환)
+  # → 같은 프로브 재측정 정상. 코어가 처방·재측정을 다 했고 여기는 집계만.
   case "$P_STATE" in
     ok)           ok "동작 프로브 $P_ID — $P_DETAIL" ;;
+    fixed)        fix "동작 프로브 $P_ID 복구 — $P_DETAIL" ;;
     fail)         bad "동작 프로브 $P_ID 고장 — $P_DETAIL" ;;
     *)            say "[INFO] 동작 프로브 $P_ID 계측 불가 — $P_DETAIL" ;;
   esac
