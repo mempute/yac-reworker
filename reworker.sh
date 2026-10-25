@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 판본: mempute/yac-data-pipeline@e794bc1a8ed426f2d40bd8606755d5daffece835 · 2026-10-25T19:47:06Z · 자동 동기화(TASK-573, 허브 워크플로 reworker_mirror) — 원본 scripts/reworker.sh · 손 편집 금지
+# 판본: mempute/yac-data-pipeline@30ed549f8f6fdfb5ae985c37a044061e125ee33e · 2026-10-25T21:40:45Z · 자동 동기화(TASK-573, 허브 워크플로 reworker_mirror) — 원본 scripts/reworker.sh · 손 편집 금지
 # reworker.sh — 워커 **유일 진입**(멱등, 재실행 안전). TASK-107.
 #
 # 사용(상태가 어떻든 언제나 같은 한 줄):
@@ -1143,6 +1143,14 @@ elif [ -t 1 ]; then
   # 중단 계약을 **쓰기 전에** 알린다(TASK-116f 범위 0) — Ctrl+Z 가 막혀
   # 있다는 사실을 눌러 본 뒤에 알게 하면 그것이 무소음이다(CR-0006).
   say "중단은 Ctrl+C 로(정리하고 어디까지 했는지 남긴다). Ctrl+Z 정지는 막혀 있다 — 멈춘 실행은 좀비와 반쯤 한 상태를 남긴다. 재실행은 멱등이다"
+fi
+
+# 사망 뒤 부팅 재개(TASK-685 범위 5) — 부팅 훅이면 ② 상주 재기동(load_guard 루프가 새 표본을 쓰기) **앞에서**
+# 앞 부팅의 마지막 load_guard 표본·열린 task 계약으로 비정상 종료를 판정하고, 사망이면 원인 분류·처방 발주·
+# 끊긴 런 재발사 갈래까지 같은 순환을 연다. 부팅당 1회(표지 파일 — 루프의 첫 표본이 먼저 돌았어도 무동작).
+if [ "$ONCE_PER_BOOT" = 1 ] && [ "$IN_JOB" != 1 ] && [ -f scripts/core/load_guard.py ]; then
+  LG_BOOT="$(PYTHONPATH=scripts timeout 300 python3 scripts/core/load_guard.py boot-check 2>&1 | tail -1)"
+  say "load_guard 부팅 판정: ${LG_BOOT:-산출 0}"
 fi
 
 # ═══ ⓪ 인스턴스 원시(TASK-136) ═════════════════════════════════════
