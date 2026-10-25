@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 판본: mempute/yac-data-pipeline@00067a14d3cc951f6554cb8e39a86602472e00b1 · 2026-10-23T08:33:18Z · 자동 동기화(TASK-573, 허브 워크플로 reworker_mirror) — 원본 scripts/reworker.sh · 손 편집 금지
+# 판본: mempute/yac-data-pipeline@e794bc1a8ed426f2d40bd8606755d5daffece835 · 2026-10-25T19:47:06Z · 자동 동기화(TASK-573, 허브 워크플로 reworker_mirror) — 원본 scripts/reworker.sh · 손 편집 금지
 # reworker.sh — 워커 **유일 진입**(멱등, 재실행 안전). TASK-107.
 #
 # 사용(상태가 어떻든 언제나 같은 한 줄):
@@ -2915,6 +2915,17 @@ step "④ 알씨 세션"
 
 RC_BEFORE="$(lv_rc_bridge_state)"
 say "판정(전): $(lv_rc_status_line)"
+# 폴더 신뢰 사전 기입(TASK-684 범위 1) — 새 기계의 관제 창(rc·rc-<프로젝트>)이
+# 'trust this folder' 화면에서 멈추지 않게, 창을 띄우는 rc_boot 와 **같은 원시**
+# (`rc_account.py trust-fixup`)를 기동 전에 한 번 부른다(멱등 — 이미 참이면 인쇄 0).
+if [ "$RC_BEFORE" != 대상아님 ]; then
+  RC_TRUST="$(PYTHONPATH="$ROOT/scripts" python3 scripts/core/rc_account.py trust-fixup 2>&1)" || true
+  case "$RC_TRUST" in
+    "") ;;
+    "[WARN]"*) bad "${RC_TRUST#\[WARN\] }" ;;
+    *) fix "$RC_TRUST" ;;
+  esac
+fi
 # 회전 대기(TASK-108) — 마커·턴 상한. 살아 있는 세션이어도 회전 사유가
 # 있으면 기동 단일점을 불러야 하므로 생존 판정보다 **먼저** 본다.
 RC_ROTATE=없음
