@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 판본: mempute/yac-data-pipeline@37dd8a841e0f932190c61df5ce48ea35606dbb6e · 2026-10-26T00:19:11Z · 자동 동기화(TASK-573, 허브 워크플로 reworker_mirror) — 원본 scripts/reworker.sh · 손 편집 금지
+# 판본: mempute/yac-data-pipeline@7bff3fffb10e7511a662a6c5fa5afb4fb72a1122 · 2026-10-26T07:28:59Z · 자동 동기화(TASK-573, 허브 워크플로 reworker_mirror) — 원본 scripts/reworker.sh · 손 편집 금지
 # reworker.sh — 워커 **유일 진입**(멱등, 재실행 안전). TASK-107.
 #
 # 사용(상태가 어떻든 언제나 같은 한 줄):
@@ -2687,6 +2687,30 @@ $(PYTHONPATH="$ROOT/scripts" python3 scripts/core/machine_probe.py run \
     --cost "$PROBE_COST" --format tsv 2>/dev/null)
 PROBE_EOF
 [ "$PROBE_SEEN" -gt 0 ] || bad "동작 프로브 실행 실패(machine_probe run) — 사전·코어 확인 필요"
+
+# 1-10b) 호스트 셸 환경 프로브(TASK-693). 2026-10-26 vast1 실측: `~/.bashrc` 가
+# LD_LIBRARY_PATH 에 conda env lib 을 전역으로 얹어 `/usr/bin/ssh` 가 conda
+# libcrypto 를 적재해 「OpenSSL version mismatch」 rc 255 — 이식봇 precheck 의
+# `tailscale ssh` 가 그대로 죽었고 bash 의 libtinfo 경고가 모든 셸 호출에 찍혔다.
+# 이 절은 **이 셸 env 그대로** 잰다(벗기면 고장을 못 본다). 항목은 사전
+# `config/instances.yml` `host_env_*`, 판정은 코어 `instance.py host-env` 한 자리.
+# `~/.bashrc` 는 저장소 밖 사용자 파일이라 자동 편집하지 않는다 — 고장이면 원인
+# 경로와 처방을 `need` 로 낸다(CUDA·libtorch 경로는 무변경, conda lib 만 분리).
+rw_phase "① 환경 점검·보충 · 1-10b 호스트 셸 환경"
+HE_SEEN=0; HE_FAIL=0
+while IFS=$'\t' read -r HE_ID HE_STATE HE_DETAIL; do
+  [ -n "$HE_ID" ] || continue
+  HE_SEEN=$((HE_SEEN + 1))
+  case "$HE_STATE" in
+    ok)   ok "호스트 셸 환경 $HE_ID — $HE_DETAIL" ;;
+    fail) HE_FAIL=$((HE_FAIL + 1)); bad "호스트 셸 환경 $HE_ID 고장 — $HE_DETAIL" ;;
+    *)    say "[INFO] 호스트 셸 환경 $HE_ID 계측 불가 — $HE_DETAIL" ;;
+  esac
+done <<HE_EOF
+$(PYTHONPATH="$ROOT/scripts" python3 scripts/core/instance.py host-env 2>/dev/null)
+HE_EOF
+[ "$HE_FAIL" -gt 0 ] && need "호스트 셸 LD_LIBRARY_PATH 누출 — ~/.bashrc 의 conda env lib export 를 그 env 의 activate 훅(\$CONDA_PREFIX/etc/conda/activate.d/)으로 옮기고 새 셸에서 'bash scripts/reworker.sh' 재실행(CUDA·libtorch 경로는 그대로)"
+[ "$HE_SEEN" -gt 0 ] || say "[INFO] 호스트 셸 환경 프로브 0건(config/instances.yml host_env_* 비어 있음 또는 실행 실패)"
 
 # ═══ ② 상주 재기동 ═════════════════════════════════════════════════
 step "② 상주 재기동"
