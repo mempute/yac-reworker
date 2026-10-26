@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 판본: mempute/yac-data-pipeline@30ed549f8f6fdfb5ae985c37a044061e125ee33e · 2026-10-25T21:40:45Z · 자동 동기화(TASK-573, 허브 워크플로 reworker_mirror) — 원본 scripts/reworker.sh · 손 편집 금지
+# 판본: mempute/yac-data-pipeline@37dd8a841e0f932190c61df5ce48ea35606dbb6e · 2026-10-26T00:19:11Z · 자동 동기화(TASK-573, 허브 워크플로 reworker_mirror) — 원본 scripts/reworker.sh · 손 편집 금지
 # reworker.sh — 워커 **유일 진입**(멱등, 재실행 안전). TASK-107.
 #
 # 사용(상태가 어떻든 언제나 같은 한 줄):
@@ -551,6 +551,30 @@ project_py_deps_ensure() {  # $1=저장소 루트 $2=잡 안(1/0) → ok/fix/bad
     bad "프로젝트 $pid 파이썬 의존 일부 미확보 — 'bash scripts/py_deps_ensure.sh $rel' 출력의 실패 줄이 수동 설치 명령을 알려준다"
   done
   [ "$n" = 0 ] && ok "프로젝트 파이썬 의존 목록 없음(projects/*/config/py_requirements.txt 0건)"
+  return 0
+}
+
+# ── 상태 원장 세우기 (TASK-687 범위 2) ───────────────────────────────────
+# 사전 `config/instances.yml` `seed_state_ledgers`(저장소 루트 상대, 쉼표)의 원장이
+# 없으면 빈 파일로 세운다 — 있으면 무변경(덮기 0, CR-0024) · 멱등(CR-0017). 새 기계
+# 에서 행이 아직 없다는 이유로 계기 신호 좌표 실존(170b ⓐ)이 실패하던 것의 처방.
+# 절대경로·`..` 항은 세우지 않고 잔여로 남긴다. 결과는 ok/fix/bad 한 줄(CR-0006).
+state_ledger_seed() {  # $1=저장소 루트
+  local root="$1" list p made="" have=0 rej=""
+  list="$(sed -n 's/^seed_state_ledgers: *//p' "$root/config/instances.yml" 2>/dev/null | head -1 | sed 's/ *#.*//')"
+  [ -n "$list" ] || { ok "상태 원장 세울 목록 없음(config/instances.yml seed_state_ledgers 비어 있음)"; return 0; }
+  for p in $(printf '%s' "$list" | tr ',' ' '); do
+    case "$p" in /*|*..*) rej="$rej $p"; continue ;; esac
+    if [ -e "$root/$p" ]; then have=$((have + 1)); continue; fi
+    if mkdir -p "$(dirname "$root/$p")" 2>/dev/null && : > "$root/$p" 2>/dev/null; then
+      made="$made $p"
+    else
+      rej="$rej $p"
+    fi
+  done
+  [ -n "$made" ] && fix "상태 원장 $(echo "$made" | wc -w)건 빈 파일로 세움(seed_state_ledgers):$made"
+  [ "$have" -gt 0 ] && ok "상태 원장 ${have}건 실존(무변경)"
+  [ -n "$rej" ] && bad "상태 원장 세우기 실패·거부(절대경로·'..'·쓰기 실패):$rej"
   return 0
 }
 
@@ -1828,11 +1852,20 @@ else
 fi
 # 파이썬 최소 의존(config/py_requirements.txt 단일 원천). 실패해도 복구
 # 자체는 계속한다 — 정말 필요한 것은 뒤 절에서 그 자리에 다시 드러난다.
-if bash "$ROOT/scripts/py_deps_ensure.sh" >/dev/null 2>&1; then
-  ok "파이썬 의존 확보(config/py_requirements.txt)"
+# 호스트 파이썬 의존(시험·분석의 openpyxl 등, TASK-687)도 같은 목록 한 벌이다 —
+# import 로 재고 없는 것만 설치(재시도 3회), 못 깐 수는 「미설치 N」 으로 싣는다.
+if PY_DEPS_OUT="$(bash "$ROOT/scripts/py_deps_ensure.sh" 2>&1)"; then
+  PY_DEPS_NEW="$(printf '%s\n' "$PY_DEPS_OUT" | grep -c '설치됨:')"
+  if [ "${PY_DEPS_NEW:-0}" -gt 0 ]; then
+    fix "파이썬 의존 ${PY_DEPS_NEW}건 설치(config/py_requirements.txt)"
+  else
+    ok "파이썬 의존 확보(config/py_requirements.txt)"
+  fi
 else
-  bad "파이썬 의존 일부 미확보 — 'bash scripts/py_deps_ensure.sh' 출력의 실패 줄이 수동 설치 명령을 알려준다"
+  bad "파이썬 의존 일부 미확보 · $(printf '%s\n' "$PY_DEPS_OUT" | grep -o '미설치 [0-9]*' | tail -1) — 'bash scripts/py_deps_ensure.sh' 출력의 실패 줄이 수동 설치 명령을 알려준다(오프라인이면 망 복구 뒤 재실행)"
 fi
+# 1-4c) 상태 원장 세우기(TASK-687 범위 2) — 사전 계기 신호가 가리키는 원장 중 없는 것만 빈 파일로.
+state_ledger_seed "$ROOT"
 # 활성 프로젝트 파이썬 의존은 종전 이 자리(1-4)에서 1-5 뒤 1-5a 로 옮겼다
 # (TASK-283 독자 전수): `projects/*/config/**` 가 git-crypt 경계에 들어
 # 빈 기계의 잠긴 클론에서는 그 목록이 암호문이다 — unlock 뒤에 읽는다.
