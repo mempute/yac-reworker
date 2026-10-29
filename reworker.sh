@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 판본: mempute/yac-data-pipeline@675bf3a975e651bfdc7e10cd5892e4b87e0e683b · 2026-10-26T17:55:47Z · 자동 동기화(TASK-573, 허브 워크플로 reworker_mirror) — 원본 scripts/reworker.sh · 손 편집 금지
+# 판본: mempute/yac-data-pipeline@9bfe956646b1f67c65e18395ea002d48e08cbc30 · 2026-10-29T04:16:12Z · 자동 동기화(TASK-573, 허브 워크플로 reworker_mirror) — 원본 scripts/reworker.sh · 손 편집 금지
 # reworker.sh — 워커 **유일 진입**(멱등, 재실행 안전). TASK-107.
 #
 # 사용(상태가 어떻든 언제나 같은 한 줄):
@@ -1741,8 +1741,8 @@ else
   inst_fill_expected "${YAC_MACHINE:-$WORKER}" "${YAC_INSTANCE_NAME:-$WORKER}" "$IN_JOB"
 fi
 # ⓪-능력) 기계 능력 선언 기입(TASK-668) — 사전 `capability_seed_by_machine`(예: vast2
-# gpu=1)을 host 인스턴스 사전 `.yac_instance` 의 `CAP_<필드>` 로 멱등 기입한다. 실측
-# (`capability_probes`, nvidia-smi)이 0·계측 불가여도 선언값을 쓰고 고지 한 줄을 낸다.
+# gpu=2)을 host 인스턴스 사전 `.yac_instance` 의 `CAP_<필드>` 로 멱등 기입한다. 실측
+# (`capability_probes`, nvidia-smi)이 다르거나 계측 불가여도 선언값을 쓰고 고지 한 줄을 낸다.
 # 선언 없는 기계(vast1)는 무변경이다. 잡 안에서는 기입하지 않는다(인스턴스 사전은 호스트 몫).
 if [ "$IS_HOST" = 1 ] && [ "$IN_JOB" != 1 ]; then
   if CAPSEED="$(python3 "$ROOT/scripts/core/instance.py" cap-seed 2>&1)"; then
@@ -1751,6 +1751,10 @@ if [ "$IS_HOST" = 1 ] && [ "$IN_JOB" != 1 ]; then
       *) ok "능력 선언 — $(printf '%s' "$CAPSEED" | tail -n 1)" ;;
     esac
     case "$CAPSEED" in *"고지"*) printf '%s\n' "$CAPSEED" | grep '고지' | sed 's/^/    /' ;; esac
+    # 실측 ≠ 사전 선언(TASK-731) — 원장 행은 cap-seed 가 남기고, 여기는 잔여 한 줄(요약 통보).
+    case "$CAPSEED" in
+      *"고지 — 어긋남"*) bad "능력 사전·실측 어긋남 — $(printf '%s\n' "$CAPSEED" | grep -m1 '고지 — 어긋남' | sed 's/^.*고지 — //') · config/instances.yml 정정(TASK-731)" ;;
+    esac
   else
     bad "능력 선언 기입 실패 — 'python3 scripts/core/instance.py cap-seed' 재실행: $(printf '%s' "$CAPSEED" | tail -n 1)"
   fi
