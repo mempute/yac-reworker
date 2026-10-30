@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 판본: mempute/yac-data-pipeline@9bfe956646b1f67c65e18395ea002d48e08cbc30 · 2026-10-29T04:16:12Z · 자동 동기화(TASK-573, 허브 워크플로 reworker_mirror) — 원본 scripts/reworker.sh · 손 편집 금지
+# 판본: mempute/yac-data-pipeline@d5c92416a16e7ae060f6bece9f1c0cefbf2cf6cb · 2026-10-30T18:46:24Z · 자동 동기화(TASK-573, 허브 워크플로 reworker_mirror) — 원본 scripts/reworker.sh · 손 편집 금지
 # reworker.sh — 워커 **유일 진입**(멱등, 재실행 안전). TASK-107.
 #
 # 사용(상태가 어떻든 언제나 같은 한 줄):
@@ -1840,6 +1840,11 @@ case "$REMOTE_LAST" in
     # ok·fix 갈래는 재기준하지 않는다: 거기서 파일이 바뀌었다면 그것이
     # 곧 설명되지 않는 되쓰기이고, 그때는 울려야 맞다.
     cred_stamp_save ;;
+  locked*)
+    # 1-5 unlock 앞이라 사전을 못 읽는다 — 설계된 보호지 오류가 아니다(PLN-3997).
+    # 사유는 한 줄로만 내고, 정정은 1-5 뒤 ① 절 재진입(TASK-583)이 다시 돈다.
+    printf '%s\n' "$REMOTE_OUT" | head -1
+    say "원격 URL 임베드 자격 검사 보류 — 보호 문서 잠김(1-5 봉인 해제 뒤 재진입이 다시 검사, PLN-3997)" ;;
   *)
     printf '%s\n' "$REMOTE_OUT"
     bad "원격 URL 임베드 자격 검출 $REMOTE_LAST — 자동 정정 실패(수동: git remote set-url <원격> https://github.com/<소유자>/<저장소>.git)" ;;
